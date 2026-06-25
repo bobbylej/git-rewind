@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install or uninstall rewind for bash and zsh.
+# Install or uninstall git-rewind for bash and zsh.
 #
 # Usage:
 #   ./install.sh              # install to ~/.local/bin
@@ -12,9 +12,9 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_BIN="${INSTALL_BIN:-$HOME/.local/bin}"
-INSTALL_SHARE="${INSTALL_SHARE:-$HOME/.local/share/rewind}"
-MARKER_BEGIN="# rewind (git-branch-switch)"
-MARKER_END="# /rewind"
+INSTALL_SHARE="${INSTALL_SHARE:-$HOME/.local/share/git-rewind}"
+MARKER_BEGIN="# git-rewind (git-branch-switch)"
+MARKER_END="# /git-rewind"
 
 DRY_RUN=false
 UNINSTALL=false
@@ -23,7 +23,7 @@ usage() {
   cat <<EOF
 Usage: ./install.sh [OPTIONS]
 
-Install rewind for bash and zsh (one command, both shells).
+Install git-rewind for bash and zsh (one command, both shells).
 
 Options:
   --uninstall   Remove binary, completions, and shell config snippets
@@ -31,8 +31,8 @@ Options:
   -h, --help    Show this help
 
 Environment:
-  INSTALL_BIN     Destination for the rewind executable (default: ~/.local/bin)
-  INSTALL_SHARE   Destination for completions (default: ~/.local/share/rewind)
+  INSTALL_BIN     Destination for the git-rewind executable (default: ~/.local/bin)
+  INSTALL_SHARE   Destination for completions (default: ~/.local/share/git-rewind)
 
 After install, open a new terminal or run:
   source ~/.bashrc    # bash
@@ -117,22 +117,22 @@ shell_snippet_lines() {
   cat <<EOF
 export PATH="${INSTALL_BIN}:\$PATH"
 if [[ -n "\${BASH_VERSION:-}" ]]; then
-  [[ -f "${INSTALL_SHARE}/completions/rewind.bash" ]] && source "${INSTALL_SHARE}/completions/rewind.bash"
+  [[ -f "${INSTALL_SHARE}/completions/git-rewind.bash" ]] && source "${INSTALL_SHARE}/completions/git-rewind.bash"
 fi
 if [[ -n "\${ZSH_VERSION:-}" ]]; then
   fpath=("${INSTALL_SHARE}/completions" \$fpath)
-  autoload -Uz _rewind 2>/dev/null
+  autoload -Uz _git-rewind 2>/dev/null
 fi
 EOF
 }
 
 install() {
-  log "installing rewind to ${INSTALL_BIN}"
+  log "installing git-rewind to ${INSTALL_BIN}"
   run mkdir -p "$INSTALL_BIN" "${INSTALL_SHARE}/completions"
-  run ln -sf "${REPO_DIR}/rewind" "${INSTALL_BIN}/rewind"
-  run cp "${REPO_DIR}/completions/rewind.bash" "${INSTALL_SHARE}/completions/rewind.bash"
-  run cp "${REPO_DIR}/completions/_rewind" "${INSTALL_SHARE}/completions/_rewind"
-  run chmod +x "${INSTALL_BIN}/rewind"
+  run ln -sf "${REPO_DIR}/git-rewind" "${INSTALL_BIN}/git-rewind"
+  run cp "${REPO_DIR}/completions/git-rewind.bash" "${INSTALL_SHARE}/completions/git-rewind.bash"
+  run cp "${REPO_DIR}/completions/_git-rewind" "${INSTALL_SHARE}/completions/_git-rewind"
+  run chmod +x "${INSTALL_BIN}/git-rewind"
 
   local -a lines=()
   while IFS= read -r line; do
@@ -145,10 +145,10 @@ install() {
   log "done"
   cat <<EOF
 
-rewind is installed for bash and zsh.
+git-rewind is installed for bash and zsh.
 
-  ${INSTALL_BIN}/rewind --help
-  rewind --time "4 hours"
+  ${INSTALL_BIN}/git-rewind --help
+  git-rewind --time "4 hours"
 
 Open a new terminal, or reload your shell:
   source ~/.bashrc   # bash
@@ -157,8 +157,8 @@ EOF
 }
 
 uninstall() {
-  log "uninstalling rewind"
-  run rm -f "${INSTALL_BIN}/rewind"
+  log "uninstalling git-rewind"
+  run rm -f "${INSTALL_BIN}/git-rewind"
   run rm -rf "${INSTALL_SHARE}"
 
   remove_marker_block "$HOME/.bashrc"
@@ -167,7 +167,7 @@ uninstall() {
   log "done"
   cat <<EOF
 
-rewind has been removed. Open a new terminal or reload your shell config.
+git-rewind has been removed. Open a new terminal or reload your shell config.
 EOF
 }
 

@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
-# rewind — jump back to a recently used git branch
+# git-rewind — jump back to a recently used git branch
 #
-# Usage: rewind [--time DURATION]
-#        rewind --config [--global] NAME [VALUE]
+# Usage: git-rewind [--time DURATION]
+#        git-rewind --config [--global] NAME [VALUE]
 #
 # Setup (bash + zsh):
 #   ./install.sh
 #
 # Override the default timeframe from your shell:
-#   export REWIND_DEFAULT_TIMEFRAME="3 days"
+#   export GIT_REWIND_DEFAULT_TIMEFRAME="3 days"
 #
 # Or persist defaults in git config (like git itself):
-#   rewind --config timeframe "3 days"
-#   rewind --config --global timeframe "1 week"
+#   git-rewind --config timeframe "3 days"
+#   git-rewind --config --global timeframe "1 week"
 #
 
 set -euo pipefail
 
-CONFIG_SECTION="rewind"
+CONFIG_SECTION="git-rewind"
 BUILTIN_DEFAULT_TIMEFRAME="1 day"
 
 # --- colors (disabled when stdout is not a TTY) ---
@@ -34,8 +34,8 @@ fi
 
 usage() {
   cat <<EOF
-Usage: rewind [--time DURATION]
-       rewind --config [--global|--system] [--unset] NAME [VALUE]
+Usage: git-rewind [--time DURATION]
+       git-rewind --config [--global|--system] [--unset] NAME [VALUE]
 
 Switch to a recently used branch using an interactive list.
 
@@ -51,15 +51,15 @@ Options:
 Configurable parameters:
   timeframe         Default lookback duration (default: ${BUILTIN_DEFAULT_TIMEFRAME})
 
-Default precedence: --time > REWIND_DEFAULT_TIMEFRAME > git config > built-in default
+Default precedence: --time > GIT_REWIND_DEFAULT_TIMEFRAME > git config > built-in default
 
 Examples:
-  rewind --config timeframe "3 days"
-  rewind --config --global timeframe "1 week"
-  rewind --config timeframe              # print current value
+  git-rewind --config timeframe "3 days"
+  git-rewind --config --global timeframe "1 week"
+  git-rewind --config timeframe              # print current value
 
 Environment:
-  REWIND_DEFAULT_TIMEFRAME   Override the default duration (e.g. "3 days")
+  GIT_REWIND_DEFAULT_TIMEFRAME   Override the default duration (e.g. "3 days")
 
 Setup:
   ./install.sh               Install for bash and zsh (~/.local/bin + completions)
@@ -72,7 +72,7 @@ EOF
 }
 
 die() {
-  echo "rewind: $*" >&2
+  echo "git-rewind: $*" >&2
   exit 1
 }
 
@@ -108,8 +108,8 @@ validate_config_value() {
 }
 
 resolve_default_timeframe() {
-  if [[ -n "${REWIND_DEFAULT_TIMEFRAME:-}" ]]; then
-    echo "$REWIND_DEFAULT_TIMEFRAME"
+  if [[ -n "${GIT_REWIND_DEFAULT_TIMEFRAME:-}" ]]; then
+    echo "$GIT_REWIND_DEFAULT_TIMEFRAME"
     return 0
   fi
 
@@ -439,7 +439,7 @@ draw_menu() {
   } >"$INTERACTIVE_OUT"
 }
 
-# Interactive arrow-key selector. Sets REWIND_CHOICE on success, returns 1 on cancel.
+# Interactive arrow-key selector. Sets GIT_REWIND_CHOICE on success, returns 1 on cancel.
 interactive_select() {
   local current_branch="$1"
   shift
@@ -447,7 +447,7 @@ interactive_select() {
   local count="${#branches[@]}"
   local selected=0
 
-  REWIND_CHOICE=""
+  GIT_REWIND_CHOICE=""
   MENU_DRAWN=false
   setup_interactive_terminal
 
@@ -490,7 +490,7 @@ interactive_select() {
         fi
         ;;
       ''|$'\n'|$'\r')
-        REWIND_CHOICE="${branches[$selected]}"
+        GIT_REWIND_CHOICE="${branches[$selected]}"
         finish_interactive
         return 0
         ;;
@@ -551,7 +551,7 @@ main() {
     exit 0
   fi
 
-  local choice="$REWIND_CHOICE"
+  local choice="$GIT_REWIND_CHOICE"
 
   if [[ "$choice" == "$current_branch" ]]; then
     exit 0

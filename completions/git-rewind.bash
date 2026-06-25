@@ -1,5 +1,5 @@
-# bash completion for rewind
-_rewind_completion() {
+# bash completion for git-rewind
+_git_rewind_completion() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   local prev="${COMP_WORDS[COMP_CWORD - 1]}"
 
@@ -23,4 +23,4 @@ _rewind_completion() {
   fi
 }
 
-complete -F _rewind_completion rewind
+complete -F _git_rewind_completion git-rewind
