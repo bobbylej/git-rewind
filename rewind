@@ -200,79 +200,211 @@ parse_duration_to_cutoff() {
   echo $(( $(date +%s) - amount * seconds_per ))
 }
 
-branch_from_reflog_message() {
-  local message="$1"
-  local branch=""
+parse_checkout_reflog_line() {
+  local line="$1"
 
-  if [[ "$message" =~ checkout:\ moving\ from\ .+\ to\ (.+)$ ]]; then
-    branch="${BASH_REMATCH[1]}"
-  elif [[ "$message" =~ (checkout|switch):\ moving\ to\ (.+)$ ]]; then
-    branch="${BASH_REMATCH[2]}"
-  elif [[ "$message" =~ switch:\ from\ .+\ to\ (.+)$ ]]; then
-    branch="${BASH_REMATCH[1]}"
+  if [[ "$line" =~ ^[0-9a-f]+\ HEAD@\{([0-9]+)\}:\ checkout:\ moving\ from\ .+\ to\ (.+)$ ]]; then
+    CHECKOUT_TS="${BASH_REMATCH[1]}"
+    CHECKOUT_BRANCH="${BASH_REMATCH[2]}"
+    return 0
   fi
 
-  if [[ -n "$branch" ]]; then
-    echo "$branch"
+  if [[ "$line" =~ ^[0-9a-f]+\ HEAD@\{([0-9]+)\}:\ switch:\ from\ .+\ to\ (.+)$ ]]; then
+    CHECKOUT_TS="${BASH_REMATCH[1]}"
+    CHECKOUT_BRANCH="${BASH_REMATCH[2]}"
     return 0
   fi
 
   return 1
 }
 
-# Collect unique branch names from reflog, most recent first.
+branch_exists() {
+  git show-ref --verify --quiet "refs/heads/${1}" 2>/dev/null
+}
+
+# Collect branches with checkout sessions overlapping the time window.
+# A branch checked out before the window but still active counts as recent
+# because its session ends at "now".
 collect_recent_branches() {
   local cutoff="$1"
-  local -a seen=()
-  local -a branches=()
-  local timestamp message branch idx
+  local -a co_branch=() co_ts=()
+  local line now prev_ts
+  local -a sess_branch=() sess_end=()
+  local -a result_branch=() result_end=()
+  local i j
 
-  idx=0
   while IFS= read -r line; do
-    timestamp="${line%% *}"
-    message="${line#* }"
-
-    if (( timestamp < cutoff )); then
-      break
+    if parse_checkout_reflog_line "$line"; then
+      co_branch+=("$CHECKOUT_BRANCH")
+      co_ts+=("$CHECKOUT_TS")
     fi
+  done < <(git reflog --date=unix HEAD 2>/dev/null)
 
-    branch=""
-    if ! branch="$(branch_from_reflog_message "$message")"; then
-      branch="$(git rev-parse --abbrev-ref "HEAD@{${idx}}" 2>/dev/null || true)"
-    fi
-    ((idx++)) || true
-
-    [[ -n "$branch" && "$branch" != "HEAD" && "$branch" != "(no branch)" ]] || continue
-    git show-ref --verify --quiet "refs/heads/${branch}" 2>/dev/null || continue
-
-    local known=false
-    for existing in "${seen[@]}"; do
-      if [[ "$existing" == "$branch" ]]; then
-        known=true
-        break
-      fi
-    done
-    $known && continue
-
-    seen+=("$branch")
-    branches+=("$branch")
-  done < <(git reflog --date=unix --format='%ct %gs' HEAD 2>/dev/null)
-
-  if ((${#branches[@]} == 0)); then
+  if ((${#co_branch[@]} == 0)); then
     return 1
   fi
 
-  printf '%s\n' "${branches[@]}"
+  now="$(date +%s)"
+  prev_ts=""
+
+  for (( i=0; i<${#co_branch[@]}; i++ )); do
+    if [[ -n "$prev_ts" ]]; then
+      sess_branch+=("${co_branch[$i]}")
+      sess_end+=("$prev_ts")
+    fi
+    prev_ts="${co_ts[$i]}"
+  done
+
+  sess_branch+=("${co_branch[0]}")
+  sess_end+=("$now")
+
+  for (( i=0; i<${#sess_branch[@]}; i++ )); do
+    (( sess_end[i] >= cutoff )) || continue
+    branch_exists "${sess_branch[$i]}" || continue
+
+    for (( j=0; j<${#result_branch[@]}; j++ )); do
+      if [[ "${result_branch[$j]}" == "${sess_branch[$i]}" ]]; then
+        if (( sess_end[i] > result_end[j] )); then
+          result_end[$j]="${sess_end[$i]}"
+        fi
+        continue 2
+      fi
+    done
+
+    result_branch+=("${sess_branch[$i]}")
+    result_end+=("${sess_end[$i]}")
+  done
+
+  if ((${#result_branch[@]} == 0)); then
+    return 1
+  fi
+
+  for (( i=0; i<${#result_branch[@]}; i++ )); do
+    printf '%010d %s\n' "${result_end[$i]}" "${result_branch[$i]}"
+  done | sort -rn | cut -d' ' -f2-
+}
+
+INTERACTIVE_IN=""
+INTERACTIVE_OUT=""
+MENU_DRAWN=false
+
+menu_cols() {
+  local cols
+  cols="$(tput cols 2>/dev/null || true)"
+  if [[ -n "$cols" && "$cols" -gt 0 ]]; then
+    echo "$cols"
+  else
+    echo "${COLUMNS:-80}"
+  fi
+}
+
+clip_branch_name() {
+  local branch="$1"
+  local max="${2:-78}"
+
+  if ((${#branch} > max)); then
+    echo "${branch:0:$(( max - 3 ))}..."
+  else
+    echo "$branch"
+  fi
+}
+
+setup_interactive_terminal() {
+  # Always prefer /dev/tty so alt-screen, redraw, and cleanup use one stream.
+  if [[ -e /dev/tty ]] && { true >/dev/tty; } 2>/dev/null; then
+    INTERACTIVE_IN=/dev/tty
+    INTERACTIVE_OUT=/dev/tty
+    return 0
+  fi
+
+  if [[ -t 0 && -t 1 ]]; then
+    INTERACTIVE_IN=/dev/stdin
+    INTERACTIVE_OUT=/dev/stdout
+    return 0
+  fi
+
+  die "interactive mode requires a terminal"
+}
+
+interactive_stty_mode() {
+  stty -echo -icanon min 1 time 0 <"$INTERACTIVE_IN" 2>/dev/null || true
+}
+
+interactive_stty_drain() {
+  stty -echo -icanon min 0 time 0 <"$INTERACTIVE_IN" 2>/dev/null || true
+}
+
+read_esc_continuation() {
+  local seq="" byte=""
+
+  if [[ "${BASH_VERSINFO[0]:-0}" -ge 4 ]]; then
+    if IFS= read -rsn1 -t 0.02 byte <"$INTERACTIVE_IN" 2>/dev/null && [[ -n "$byte" ]]; then
+      seq="$byte"
+      if [[ "$byte" == '[' || "$byte" == 'O' ]]; then
+        IFS= read -rsn1 -t 0.02 byte <"$INTERACTIVE_IN" 2>/dev/null && [[ -n "$byte" ]] && seq+="$byte"
+      fi
+    fi
+    printf '%s' "$seq"
+    return 0
+  fi
+
+  # Bash 3.2 (macOS default): brief pause, then drain without blocking per byte.
+  sleep 0.01
+  interactive_stty_drain
+  while IFS= read -rsn1 byte <"$INTERACTIVE_IN" 2>/dev/null && [[ -n "$byte" ]]; do
+    seq+="$byte"
+    if [[ ${#seq} -ge 2 && "$seq" == "["* ]]; then
+      break
+    fi
+    if [[ ${#seq} -ge 2 && "$seq" == O* ]]; then
+      break
+    fi
+    [[ ${#seq} -ge 6 ]] && break
+  done
+  printf '%s' "$seq"
+}
+
+read_interactive_key() {
+  local key="" seq=""
+
+  IFS= read -rsn1 key <"$INTERACTIVE_IN" || return 1
+
+  if [[ "$key" != $'\x1b' ]]; then
+    READ_KEY="$key"
+    return 0
+  fi
+
+  seq="$(read_esc_continuation)"
+  interactive_stty_mode
+  READ_KEY="${key}${seq}"
+  return 0
 }
 
 format_branch_label() {
   local branch="$1"
   local current="$2"
+  local display width
+
+  width=$(( $(menu_cols) - 2 ))
+  display="$(clip_branch_name "$branch" "$width")"
 
   if [[ "$branch" == "$current" ]]; then
-    printf '%b● %s' "$GREEN" "$branch"
+    printf '%b● %s%b' "$GREEN" "$display" "$RESET"
   else
-    printf '  %s' "$branch"
+    printf '  %s' "$display"
+  fi
+}
+
+print_menu_line() {
+  local selected="$1"
+  local index="$2"
+  local current_branch="$3"
+  local branch="$4"
+
+  if (( index == selected )); then
+    printf '\033[K%b%s%b\n' "$REVERSE" "$(format_branch_label "$branch" "$current_branch")" "$RESET"
+  else
+    printf '\033[K%s\n' "$(format_branch_label "$branch" "$current_branch")"
   fi
 }
 
@@ -282,25 +414,32 @@ draw_menu() {
   shift 2
   local -a branches=("$@")
   local count="${#branches[@]}"
+  local block_lines=$(( count + 4 ))
   local i=0
 
-  printf '\033[2J\033[H'
-  printf '%bRecent branches%b  %b(%d)%b\n\n' "$BOLD" "$RESET" "$DIM" "$count" "$RESET"
-
-  for branch in "${branches[@]}"; do
-    if (( i == selected )); then
-      printf ' %b %b\n' "$REVERSE" "$(format_branch_label "$branch" "$current_branch")$RESET"
+  {
+    if $MENU_DRAWN; then
+      printf '\033[%dA' "$block_lines"
     else
-      printf '  %b\n' "$(format_branch_label "$branch" "$current_branch")"
+      printf '\033[2J\033[H'
+      MENU_DRAWN=true
     fi
-    ((i++)) || true
-  done
 
-  printf '\n%b↑/↓%b navigate  %bEnter%b select  %bEsc%b cancel\n' \
-    "$DIM" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
+    printf '\033[K%bRecent branches%b  %b(%d)%b\n' "$BOLD" "$RESET" "$DIM" "$count" "$RESET"
+    printf '\033[K\n'
+
+    for branch in "${branches[@]}"; do
+      print_menu_line "$selected" "$i" "$current_branch" "$branch"
+      ((i++)) || true
+    done
+
+    printf '\033[K\n'
+    printf '\033[K%b↑/↓%b navigate  %bEnter%b select  %bEsc%b cancel\n' \
+      "$DIM" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
+  } >"$INTERACTIVE_OUT"
 }
 
-# Interactive arrow-key selector. Prints selected branch to stdout, or exits 1 on cancel.
+# Interactive arrow-key selector. Sets REWIND_CHOICE on success, returns 1 on cancel.
 interactive_select() {
   local current_branch="$1"
   shift
@@ -308,33 +447,57 @@ interactive_select() {
   local count="${#branches[@]}"
   local selected=0
 
-  [[ -t 0 && -t 1 ]] || die "interactive mode requires a terminal"
+  REWIND_CHOICE=""
+  MENU_DRAWN=false
+  setup_interactive_terminal
 
-  tput civis 2>/dev/null || true
-  trap 'tput cnorm 2>/dev/null || true' EXIT
+  local saved_stty=""
+  saved_stty="$(stty -g <"$INTERACTIVE_IN" 2>/dev/null || true)"
+
+  cleanup_interactive() {
+    printf '\033[?1049l' >"$INTERACTIVE_OUT" 2>/dev/null || true
+    [[ -n "$saved_stty" ]] && stty "$saved_stty" <"$INTERACTIVE_IN" 2>/dev/null || true
+    tput cnorm >"$INTERACTIVE_OUT" 2>/dev/null || true
+    MENU_DRAWN=false
+  }
+
+  finish_interactive() {
+    trap - EXIT
+    cleanup_interactive
+  }
+
+  tput civis >"$INTERACTIVE_OUT" 2>/dev/null || true
+  trap cleanup_interactive EXIT
+  interactive_stty_mode
+  printf '\033[?1049h\033[2J\033[H' >"$INTERACTIVE_OUT" 2>/dev/null || true
 
   draw_menu "$selected" "$current_branch" "${branches[@]}"
 
   while true; do
-    local key key2=""
-    IFS= read -rsn1 key || exit 1
+    read_interactive_key || return 1
 
-    case "$key" in
-      $'\x1b')
-        IFS= read -rsn2 -t 0 key2 || key2=""
-        case "$key2" in
-          '[A') (( selected > 0 )) && ((selected--)) && draw_menu "$selected" "$current_branch" "${branches[@]}" ;;
-          '[B') (( selected < count - 1 )) && ((selected++)) && draw_menu "$selected" "$current_branch" "${branches[@]}" ;;
-          '') exit 1 ;;
-        esac
+    case "$READ_KEY" in
+      $'\x1b[A'|$'\x1bOA')
+        if (( selected > 0 )); then
+          ((selected--))
+          draw_menu "$selected" "$current_branch" "${branches[@]}"
+        fi
         ;;
-      '')
-        tput cnorm 2>/dev/null || true
-        trap - EXIT
-        printf '%s' "${branches[$selected]}"
+      $'\x1b[B'|$'\x1bOB')
+        if (( selected < count - 1 )); then
+          ((selected++))
+          draw_menu "$selected" "$current_branch" "${branches[@]}"
+        fi
+        ;;
+      ''|$'\n'|$'\r')
+        REWIND_CHOICE="${branches[$selected]}"
+        finish_interactive
         return 0
         ;;
-      q|Q) exit 1 ;;
+      q|Q|$'\x1b'*)
+        finish_interactive
+        return 1
+        ;;
     esac
   done
 }
@@ -384,11 +547,13 @@ main() {
   local current_branch
   current_branch="$(git branch --show-current 2>/dev/null || echo "")"
 
-  local choice
-  choice="$(interactive_select "$current_branch" "${branches[@]}")"
+  if ! interactive_select "$current_branch" "${branches[@]}"; then
+    exit 0
+  fi
+
+  local choice="$REWIND_CHOICE"
 
   if [[ "$choice" == "$current_branch" ]]; then
-    echo "Already on '${choice}'."
     exit 0
   fi
 
