@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+#
+# rewind — jump back to a recently used git branch
+#
+# Usage: rewind [--time DURATION]
+#
+# Override the default timeframe from your shell:
+#   export REWIND_DEFAULT_TIMEFRAME="3 days"
+#
+
+set -euo pipefail
+
+# --- configuration (override via REWIND_DEFAULT_TIMEFRAME env var) ---
+DEFAULT_TIMEFRAME="${REWIND_DEFAULT_TIMEFRAME:-1 day}"
+
+# --- colors (disabled when stdout is not a TTY) ---
+if [[ -t 1 ]]; then
+  BOLD='\033[1m'
+  DIM='\033[2m'
+  GREEN='\033[32m'
+  RESET='\033[0m'
+  REVERSE='\033[7m'
+else
+  BOLD='' DIM='' GREEN='' RESET='' REVERSE=''
+fi
+
+usage() {
+  cat <<EOF
+Usage: rewind [--time DURATION]
+
+Switch to a recently used branch using an interactive list.
+
+Options:
+  --time DURATION   Look back this far (default: ${DEFAULT_TIMEFRAME})
+                    Examples: "4 hours", "1 day", "2 weeks", "30m", "1w"
+
+Environment:
+  REWIND_DEFAULT_TIMEFRAME   Override the default duration (e.g. "3 days")
+
+Keys:
+  ↑ / ↓   Navigate
+  Enter   Checkout selected branch
+  Esc     Cancel
+EOF
+}
+
+die() {
+  echo "rewind: $*" >&2
+  exit 1
+}
+
+require_git_repo() {
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+}
+
+# Parse human-friendly durations into a cutoff unix timestamp.
+# Supports: "N unit", or shorthand like 30m, 4h, 2d, 1w.
+parse_duration_to_cutoff() {
+  local input="$1"
+  local normalized amount unit seconds_per
+
+  normalized="$(echo "$input" | tr '[:upper:]' '[:lower:]' | xargs)"
+  [[ -n "$normalized" ]] || die "empty time duration"
+
+  if [[ "$normalized" =~ ^([0-9]+)([mhdw]|min|mins|minute|minutes|hour|hours|day|days|week|weeks|month|months)$ ]]; then
+    amount="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+  elif [[ "$normalized" =~ ^([0-9]+)[[:space:]]+(minute|minutes|min|mins|hour|hours|day|days|week|weeks|month|months)$ ]]; then
+    amount="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+  else
+    die "invalid time duration: '$input' (examples: '1 day', '4 hours', '2w', '30m')"
+  fi
+
+  case "$unit" in
+    m|min|mins|minute|minutes) seconds_per=60 ;;
+    h|hour|hours)              seconds_per=3600 ;;
+    d|day|days)                seconds_per=86400 ;;
+    w|week|weeks)              seconds_per=604800 ;;
+    month|months)                seconds_per=2592000 ;; # 30 days
+    *) die "unsupported time unit in: '$input'" ;;
+  esac
+
+  echo $(( $(date +%s) - amount * seconds_per ))
+}
+
+branch_from_reflog_message() {
+  local message="$1"
+  local branch=""
+
+  if [[ "$message" =~ checkout:\ moving\ from\ .+\ to\ (.+)$ ]]; then
+    branch="${BASH_REMATCH[1]}"
+  elif [[ "$message" =~ (checkout|switch):\ moving\ to\ (.+)$ ]]; then
+    branch="${BASH_REMATCH[2]}"
+  elif [[ "$message" =~ switch:\ from\ .+\ to\ (.+)$ ]]; then
+    branch="${BASH_REMATCH[1]}"
+  fi
+
+  if [[ -n "$branch" ]]; then
+    echo "$branch"
+    return 0
+  fi
+
+  return 1
+}
+
+# Collect unique branch names from reflog, most recent first.
+collect_recent_branches() {
+  local cutoff="$1"
+  local -a seen=()
+  local -a branches=()
+  local timestamp message branch idx
+
+  idx=0
+  while IFS= read -r line; do
+    timestamp="${line%% *}"
+    message="${line#* }"
+
+    if (( timestamp < cutoff )); then
+      break
+    fi
+
+    branch=""
+    if ! branch="$(branch_from_reflog_message "$message")"; then
+      branch="$(git rev-parse --abbrev-ref "HEAD@{${idx}}" 2>/dev/null || true)"
+    fi
+    ((idx++)) || true
+
+    [[ -n "$branch" && "$branch" != "HEAD" && "$branch" != "(no branch)" ]] || continue
+    git show-ref --verify --quiet "refs/heads/${branch}" 2>/dev/null || continue
+
+    local known=false
+    for existing in "${seen[@]}"; do
+      if [[ "$existing" == "$branch" ]]; then
+        known=true
+        break
+      fi
+    done
+    $known && continue
+
+    seen+=("$branch")
+    branches+=("$branch")
+  done < <(git reflog --date=unix --format='%ct %gs' HEAD 2>/dev/null)
+
+  if ((${#branches[@]} == 0)); then
+    return 1
+  fi
+
+  printf '%s\n' "${branches[@]}"
+}
+
+format_branch_label() {
+  local branch="$1"
+  local current="$2"
+
+  if [[ "$branch" == "$current" ]]; then
+    printf '%b● %s' "$GREEN" "$branch"
+  else
+    printf '  %s' "$branch"
+  fi
+}
+
+draw_menu() {
+  local selected="$1"
+  local current_branch="$2"
+  shift 2
+  local -a branches=("$@")
+  local count="${#branches[@]}"
+  local i=0
+
+  printf '\033[2J\033[H'
+  printf '%bRecent branches%b  %b(%d)%b\n\n' "$BOLD" "$RESET" "$DIM" "$count" "$RESET"
+
+  for branch in "${branches[@]}"; do
+    if (( i == selected )); then
+      printf ' %b %b\n' "$REVERSE" "$(format_branch_label "$branch" "$current_branch")$RESET"
+    else
+      printf '  %b\n' "$(format_branch_label "$branch" "$current_branch")"
+    fi
+    ((i++)) || true
+  done
+
+  printf '\n%b↑/↓%b navigate  %bEnter%b select  %bEsc%b cancel\n' \
+    "$DIM" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
+}
+
+# Interactive arrow-key selector. Prints selected branch to stdout, or exits 1 on cancel.
+interactive_select() {
+  local current_branch="$1"
+  shift
+  local -a branches=("$@")
+  local count="${#branches[@]}"
+  local selected=0
+
+  [[ -t 0 && -t 1 ]] || die "interactive mode requires a terminal"
+
+  tput civis 2>/dev/null || true
+  trap 'tput cnorm 2>/dev/null || true' EXIT
+
+  draw_menu "$selected" "$current_branch" "${branches[@]}"
+
+  while true; do
+    local key key2=""
+    IFS= read -rsn1 key || exit 1
+
+    case "$key" in
+      $'\x1b')
+        IFS= read -rsn2 -t 0.01 key2 || key2=""
+        case "$key2" in
+          '[A') (( selected > 0 )) && ((selected--)) && draw_menu "$selected" "$current_branch" "${branches[@]}" ;;
+          '[B') (( selected < count - 1 )) && ((selected++)) && draw_menu "$selected" "$current_branch" "${branches[@]}" ;;
+          '') exit 1 ;;
+        esac
+        ;;
+      '')
+        tput cnorm 2>/dev/null || true
+        trap - EXIT
+        printf '%s' "${branches[$selected]}"
+        return 0
+        ;;
+      q|Q) exit 1 ;;
+    esac
+  done
+}
+
+main() {
+  local timeframe="$DEFAULT_TIMEFRAME"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --time)
+        [[ $# -ge 2 ]] || die "--time requires a value"
+        timeframe="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1 (try --help)"
+        ;;
+    esac
+  done
+
+  require_git_repo
+
+  local cutoff
+  cutoff="$(parse_duration_to_cutoff "$timeframe")"
+
+  local -a branches=()
+  while IFS= read -r branch; do
+    branches+=("$branch")
+  done < <(collect_recent_branches "$cutoff" || true)
+
+  if ((${#branches[@]} == 0)); then
+    die "no branches found in the last ${timeframe}"
+  fi
+
+  local current_branch
+  current_branch="$(git branch --show-current 2>/dev/null || echo "")"
+
+  local choice
+  choice="$(interactive_select "$current_branch" "${branches[@]}")"
+
+  if [[ "$choice" == "$current_branch" ]]; then
+    echo "Already on '${choice}'."
+    exit 0
+  fi
+
+  echo "Switching to '${choice}'..."
+  git checkout "$choice"
+}
+
+main "$@"
