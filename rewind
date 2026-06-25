@@ -3,15 +3,20 @@
 # rewind — jump back to a recently used git branch
 #
 # Usage: rewind [--time DURATION]
+#        rewind --config [--global] NAME [VALUE]
 #
 # Override the default timeframe from your shell:
 #   export REWIND_DEFAULT_TIMEFRAME="3 days"
 #
+# Or persist defaults in git config (like git itself):
+#   rewind --config timeframe "3 days"
+#   rewind --config --global timeframe "1 week"
+#
 
 set -euo pipefail
 
-# --- configuration (override via REWIND_DEFAULT_TIMEFRAME env var) ---
-DEFAULT_TIMEFRAME="${REWIND_DEFAULT_TIMEFRAME:-1 day}"
+CONFIG_SECTION="rewind"
+BUILTIN_DEFAULT_TIMEFRAME="1 day"
 
 # --- colors (disabled when stdout is not a TTY) ---
 if [[ -t 1 ]]; then
@@ -27,12 +32,28 @@ fi
 usage() {
   cat <<EOF
 Usage: rewind [--time DURATION]
+       rewind --config [--global|--system] [--unset] NAME [VALUE]
 
 Switch to a recently used branch using an interactive list.
 
 Options:
-  --time DURATION   Look back this far (default: ${DEFAULT_TIMEFRAME})
+  --time DURATION   Look back this far for this run only
                     Examples: "4 hours", "1 day", "2 weeks", "30m", "1w"
+  --config NAME [VALUE]
+                    Read or write a default (stored as git config ${CONFIG_SECTION}.*)
+    --global        Write to ~/.gitconfig instead of the local repo
+    --system        Write to system-wide git config
+    --unset         Remove the stored default
+
+Configurable parameters:
+  timeframe         Default lookback duration (default: ${BUILTIN_DEFAULT_TIMEFRAME})
+
+Default precedence: --time > REWIND_DEFAULT_TIMEFRAME > git config > built-in default
+
+Examples:
+  rewind --config timeframe "3 days"
+  rewind --config --global timeframe "1 week"
+  rewind --config timeframe              # print current value
 
 Environment:
   REWIND_DEFAULT_TIMEFRAME   Override the default duration (e.g. "3 days")
@@ -51,6 +72,95 @@ die() {
 
 require_git_repo() {
   git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+}
+
+config_full_key() {
+  echo "${CONFIG_SECTION}.${1}"
+}
+
+known_config_param() {
+  case "$1" in
+    timeframe) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+get_git_config() {
+  local param="$1"
+  git config --get "$(config_full_key "$param")" 2>/dev/null || true
+}
+
+validate_config_value() {
+  local param="$1"
+  local value="$2"
+
+  case "$param" in
+    timeframe)
+      parse_duration_to_cutoff "$value" >/dev/null
+      ;;
+  esac
+}
+
+resolve_default_timeframe() {
+  if [[ -n "${REWIND_DEFAULT_TIMEFRAME:-}" ]]; then
+    echo "$REWIND_DEFAULT_TIMEFRAME"
+    return 0
+  fi
+
+  local from_config
+  from_config="$(get_git_config timeframe)"
+  if [[ -n "$from_config" ]]; then
+    echo "$from_config"
+    return 0
+  fi
+
+  echo "$BUILTIN_DEFAULT_TIMEFRAME"
+}
+
+handle_config_command() {
+  local scope="" unset=false param value git_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --global) scope="global"; shift ;;
+      --system) scope="system"; shift ;;
+      --unset) unset=true; shift ;;
+      -*) die "unknown --config option: $1" ;;
+      *) break ;;
+    esac
+  done
+
+  [[ $# -ge 1 ]] || die "--config requires a parameter name (try --help)"
+  param="$1"
+  shift
+
+  known_config_param "$param" || die "unknown config parameter: '$param' (known: timeframe)"
+
+  case "$scope" in
+    global) git_args=(--global) ;;
+    system) git_args=(--system) ;;
+    *) require_git_repo ;;
+  esac
+
+  local key
+  key="$(config_full_key "$param")"
+
+  if $unset; then
+    git config "${git_args[@]}" --unset "$key" 2>/dev/null || true
+    exit 0
+  fi
+
+  if [[ $# -eq 0 ]]; then
+    value="$(get_git_config "$param")"
+    [[ -n "$value" ]] || die "config parameter '${param}' is not set"
+    printf '%s\n' "$value"
+    exit 0
+  fi
+
+  value="$1"
+  validate_config_value "$param" "$value"
+  git config "${git_args[@]}" "$key" "$value"
+  exit 0
 }
 
 # Parse human-friendly durations into a cutoff unix timestamp.
@@ -224,7 +334,7 @@ interactive_select() {
 }
 
 main() {
-  local timeframe="$DEFAULT_TIMEFRAME"
+  local timeframe=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -232,6 +342,10 @@ main() {
         [[ $# -ge 2 ]] || die "--time requires a value"
         timeframe="$2"
         shift 2
+        ;;
+      --config)
+        shift
+        handle_config_command "$@"
         ;;
       -h|--help)
         usage
@@ -244,6 +358,10 @@ main() {
   done
 
   require_git_repo
+
+  if [[ -z "$timeframe" ]]; then
+    timeframe="$(resolve_default_timeframe)"
+  fi
 
   local cutoff
   cutoff="$(parse_duration_to_cutoff "$timeframe")"
