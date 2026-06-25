@@ -1,0 +1,11 @@
+#compdef rewind
+
+_arguments -C \
+  '--time[Look back this far]:duration:(1\ hour 4\ hours 1\ day 3\ days 1\ week 2\ weeks 30m 4h 2d 1w)' \
+  '--config[Read or write a default]' \
+  '--global[Write to ~/.gitconfig]' \
+  '--system[Write to system git config]' \
+  '--unset[Remove stored default]' \
+  '1:parameter:(timeframe)' \
+  '--help[Show help]' \
+  '-h[Show help]'
